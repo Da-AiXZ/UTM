@@ -1,5 +1,4 @@
-# ClaudeBox build: fork UTM, download Sysroot, build unsigned IPA for TrollStore.
-# 适配标准 GitHub Actions runner (非 MacStadium self-hosted)。
+# ClaudeBox build: fork UTM with xterm.js terminal, build unsigned IPA for TrollStore.
 name: ClaudeBox Build
 
 on:
@@ -27,14 +26,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 用 gh CLI 从上游 UTM 的 release build 下载 Sysroot-ios-arm64
-          # 找最新的 release run
           RUN_ID=$(gh run list --repo utmapp/UTM --workflow Build --event release --limit 1 --json databaseId --jq '.[0].databaseId')
           echo "Using upstream run: $RUN_ID"
-          # 下载 artifact (gh 会解压 zip)
           mkdir -p sysroot-tmp
           gh run download "$RUN_ID" --repo utmapp/UTM --name Sysroot-ios-arm64 --dir sysroot-tmp
-          # artifact 里是 sysroot.tgz, 解压到仓库根
           ls -la sysroot-tmp/
           tar -xzf sysroot-tmp/sysroot.tgz
           echo "--- sysroot 目录 ---"
@@ -50,12 +45,23 @@ jobs:
           ./scripts/build_utm.sh -k iphoneos -s iOS -a arm64 -o build/ClaudeBox
           ls -la build/ClaudeBox.xcarchive/Products/Applications/
 
+      - name: Inject WebTerminal assets into App bundle
+        run: |
+          APP_PATH=$(find build/ClaudeBox.xcarchive -name "UTM.app" -type d | head -1)
+          echo "App bundle: $APP_PATH"
+          mkdir -p "$APP_PATH"
+          cp Platform/iOS/Display/WebTerminal/terminal.html "$APP_PATH/"
+          cp Platform/iOS/Display/WebTerminal/xterm.js "$APP_PATH/"
+          cp Platform/iOS/Display/WebTerminal/xterm.css "$APP_PATH/"
+          cp Platform/iOS/Display/WebTerminal/addon-fit.js "$APP_PATH/"
+          echo "--- WebTerminal assets in bundle ---"
+          ls -lh "$APP_PATH/terminal.html" "$APP_PATH/xterm.js" "$APP_PATH/xterm.css" "$APP_PATH/addon-fit.js"
+
       - name: Package unsigned IPA
         run: |
           APP_PATH=$(find build/ClaudeBox.xcarchive -name "UTM.app" -type d | head -1)
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
-          # 改名为 ClaudeBox
           if [ -d "Payload/UTM.app" ]; then
             mv "Payload/UTM.app" "Payload/ClaudeBox.app"
           fi

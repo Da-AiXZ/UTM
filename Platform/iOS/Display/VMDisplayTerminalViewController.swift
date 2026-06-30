@@ -17,6 +17,7 @@
 import Foundation
 import SwiftTerm
 import SwiftUI
+import WebKit
 
 @objc class VMDisplayTerminalViewController: VMDisplayViewController {
     private var terminalView: TerminalView!
@@ -242,5 +243,179 @@ extension VMDisplayTerminalViewController: CSPortDelegate {
                 terminalView.feed(byteArray: arr)
             }
         }
+    }
+}
+
+// MARK: - xterm.js based terminal (better CJK + touch support)
+
+@objc class VMDisplayWebTerminalViewController: VMDisplayViewController {
+    
+    private var webView: WKWebView!
+    private var isTerminalReady = false
+    private var pendingData: [Data] = []
+    
+    var vmSerialPort: CSPort {
+        willSet {
+            vmSerialPort.delegate = nil
+            newValue.delegate = self
+            if isTerminalReady {
+                webView?.evaluateJavaScript("clearTerminal();", completionHandler: nil)
+            }
+        }
+    }
+    
+    private var style: UTMConfigurationTerminal?
+    
+    required init(port: CSPort, style: UTMConfigurationTerminal? = nil) {
+        self.vmSerialPort = port
+        super.init(nibName: nil, bundle: nil)
+        port.delegate = self
+        self.style = style
+    }
+    
+    required init?(coder: NSCoder) {
+        return nil
+    }
+    
+    override func loadView() {
+        super.loadView()
+        
+        let config = WKWebViewConfiguration()
+        config.preferences.javaScriptCanOpenWindowsAutomatically = false
+        
+        let contentController = config.userContentController
+        contentController.add(self, name: "terminalInput")
+        contentController.add(self, name: "terminalResize")
+        contentController.add(self, name: "terminalReady")
+        contentController.add(self, name: "terminalSelection")
+        
+        webView = WKWebView(frame: .zero, configuration: config)
+        webView.isOpaque = false
+        webView.backgroundColor = UIColor(red: 30/255, green: 30/255, blue: 30/255, alpha: 1)
+        webView.scrollView.isScrollEnabled = false
+        webView.scrollView.bounces = false
+        webView.translatesAutoresizingMaskIntoConstraints = false
+        view.insertSubview(webView, at: 0)
+        
+        webView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor).isActive = true
+        webView.leftAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leftAnchor).isActive = true
+        webView.rightAnchor.constraint(equalTo: view.safeAreaLayoutGuide.rightAnchor).isActive = true
+        
+        if #available(iOS 15.0, *) {
+            webView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor).isActive = true
+        } else {
+            webView.bottomAnchor.constraint(equalTo: view.bottomAnchor).isActive = true
+        }
+        
+        loadTerminalHTML()
+    }
+    
+    override func enterLive() {
+        super.enterLive()
+    }
+    
+    override func showKeyboard() {
+        super.showKeyboard()
+        if isTerminalReady {
+            webView?.evaluateJavaScript("focusTerminal();", completionHandler: nil)
+        }
+    }
+    
+    override func hideKeyboard() {
+        super.hideKeyboard()
+        webView?.endEditing(true)
+    }
+    
+    private func loadTerminalHTML() {
+        if let htmlURL = Bundle.main.url(forResource: "terminal", withExtension: "html") {
+            webView.loadFileURL(htmlURL, allowingReadAccessTo: htmlURL.deletingLastPathComponent())
+        } else {
+            NSLog("[ClaudeBox] terminal.html not found in bundle!")
+        }
+    }
+    
+    private func applyStyle() {
+        guard let style = style else { return }
+        let fontSize = style.fontSize
+        webView?.evaluateJavaScript("setFontSize(\(fontSize));", completionHandler: nil)
+        
+        var theme: [String: Any] = [:]
+        if let bg = style.backgroundColor {
+            theme["background"] = bg
+        }
+        if let fg = style.foregroundColor {
+            theme["foreground"] = fg
+        }
+        if !theme.isEmpty {
+            if let jsonData = try? JSONSerialization.data(withJSONObject: theme),
+               let jsonString = String(data: jsonData, encoding: .utf8) {
+                webView?.evaluateJavaScript("setTheme(\(jsonString));", completionHandler: nil)
+            }
+        }
+    }
+}
+
+extension VMDisplayWebTerminalViewController: WKScriptMessageHandler {
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        switch message.name {
+        case "terminalReady":
+            isTerminalReady = true
+            applyStyle()
+            for data in pendingData {
+                feedToTerminal(data)
+            }
+            pendingData.removeAll()
+            if let body = message.body as? [String: Any],
+               let cols = body["cols"] as? Int,
+               let rows = body["rows"] as? Int {
+                delegate?.displayViewSize = CGSize(width: cols, height: rows)
+            }
+            
+        case "terminalInput":
+            if let input = message.body as? String {
+                let data = Data(input.utf8)
+                vmSerialPort.write(data)
+                delegate?.displayDidAssertUserInteraction()
+            }
+            
+        case "terminalResize":
+            if let body = message.body as? [String: Any],
+               let cols = body["cols"] as? Int,
+               let rows = body["rows"] as? Int {
+                delegate?.displayViewSize = CGSize(width: cols, height: rows)
+            }
+            
+        case "terminalSelection":
+            if let selection = message.body as? String {
+                UIPasteboard.general.string = selection
+            }
+            
+        default:
+            break
+        }
+    }
+}
+
+extension VMDisplayWebTerminalViewController: CSPortDelegate {
+    func portDidDisconect(_ port: CSPort) {
+    }
+    
+    func port(_ port: CSPort, didError error: String) {
+        delegate?.serialDidError(error)
+    }
+    
+    func port(_ port: CSPort, didRecieveData data: Data) {
+        DispatchQueue.main.async {
+            if self.isTerminalReady {
+                self.feedToTerminal(data)
+            } else {
+                self.pendingData.append(data)
+            }
+        }
+    }
+    
+    private func feedToTerminal(_ data: Data) {
+        let base64 = data.base64EncodedString()
+        webView?.evaluateJavaScript("writeToTerminal('\(base64)');", completionHandler: nil)
     }
 }

@@ -158,7 +158,7 @@ struct VMDisplayHostedView: UIViewControllerRepresentable {
             vc = mvc
         case .serial(let serial, let id):
             let style = vm.config.serials[id].terminal
-            vc = VMDisplayTerminalViewController(port: serial, style: style)
+            vc = VMDisplayWebTerminalViewController(port: serial, style: style)
             vc.delegate = context.coordinator
         }
         context.coordinator.vmStateCancellable = session.$vmState.sink { vmState in

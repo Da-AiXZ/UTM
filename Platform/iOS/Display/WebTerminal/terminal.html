@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<link rel="stylesheet" href="xterm.css">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; overflow: hidden; background: #1e1e1e; }
+#terminal-container {
+    width: 100vw;
+    height: 100vh;
+    padding: 4px;
+}
+/* CJK 字体回退链 */
+.xterm-viewport::-webkit-scrollbar { width: 6px; }
+.xterm-viewport::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.2); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="terminal-container"></div>
+<script src="xterm.js"></script>
+<script src="addon-fit.js"></script>
+<script>
+(function() {
+    const container = document.getElementById('terminal-container');
+    
+    const term = new Terminal({
+        fontFamily: "'SF Mono', 'Menlo', 'Noto Sans CJK SC', 'Noto Sans CJK TC', 'PingFang SC', 'Hiragino Sans GB', monospace",
+        fontSize: 14,
+        cursorBlink: true,
+        cursorStyle: 'bar',
+        allowProposedApi: true,
+        scrollback: 5000,
+        convertEol: false,
+        macOptionIsMeta: true,
+        // 移动端优化
+        windowsMode: false,
+        tabStopWidth: 4
+    });
+    
+    const fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(container);
+    
+    // 自适应尺寸
+    function fitTerminal() {
+        try {
+            fitAddon.fit();
+            const dims = { cols: term.cols, rows: term.rows };
+            window.webkit.messageHandlers.terminalResize.postMessage(dims);
+        } catch(e) {
+            console.error('fit error:', e);
+        }
+    }
+    
+    // 延迟一帧再 fit，确保布局完成
+    requestAnimationFrame(() => fitTerminal());
+    
+    // 窗口尺寸变化时重新 fit
+    window.addEventListener('resize', () => {
+        fitTerminal();
+    });
+    
+    // 旋转时重新 fit
+    window.addEventListener('orientationchange', () => {
+        setTimeout(() => fitTerminal(), 300);
+    });
+    
+    // ─── Swift → JS: 写入终端数据 ───
+    window.writeToTerminal = function(base64Data) {
+        const binary = atob(base64Data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        term.write(bytes);
+        // 自动滚动到底部（解决键盘弹出后不置底的问题）
+        term.scrollToBottom();
+    };
+    
+    // ─── JS → Swift: 终端输入 ───
+    term.onData(function(data) {
+        window.webkit.messageHandlers.terminalInput.postMessage(data);
+    });
+    
+    // ─── 选中处理 ───
+    // 长按才进入选中模式，不触发键盘
+    let isSelecting = false;
+    let longPressTimer = null;
+    let touchStartTime = 0;
+    
+    container.addEventListener('touchstart', function(e) {
+        touchStartTime = Date.now();
+        if (e.touches.length === 1) {
+            longPressTimer = setTimeout(() => {
+                isSelecting = true;
+                // 长按进入选择模式，阻止键盘弹出
+                if (document.activeElement && document.activeElement.blur) {
+                    // 不 blur，让 xterm 处理选择
+                }
+            }, 500);
+        }
+    }, { passive: true });
+    
+    container.addEventListener('touchmove', function(e) {
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+    }, { passive: true });
+    
+    container.addEventListener('touchend', function(e) {
+        if (longPressTimer) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+        // 短按恢复输入模式
+        const elapsed = Date.now() - touchStartTime;
+        if (elapsed < 500) {
+            isSelecting = false;
+        }
+        // 延迟重置选择状态
+        setTimeout(() => { isSelecting = false; }, 1000);
+    }, { passive: true });
+    
+    // ─── 选中复制 ───
+    term.onSelectionChange(function() {
+        const selection = term.getSelection();
+        if (selection) {
+            window.webkit.messageHandlers.terminalSelection.postMessage(selection);
+        }
+    });
+    
+    // ─── 暴露给 Swift 调用的方法 ───
+    window.clearTerminal = function() {
+        term.clear();
+    };
+    
+    window.resizeTerminal = function(cols, rows) {
+        term.resize(cols, rows);
+    };
+    
+    window.focusTerminal = function() {
+        term.focus();
+        term.scrollToBottom();
+    };
+    
+    window.setTheme = function(theme) {
+        term.options.theme = theme;
+    };
+    
+    window.setFontSize = function(size) {
+        term.options.fontSize = size;
+        fitTerminal();
+    };
+    
+    // 通知 Swift 终端已就绪
+    window.webkit.messageHandlers.terminalReady.postMessage({ cols: term.cols, rows: term.rows });
+})();
+</script>
+</body>
+</html>
