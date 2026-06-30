@@ -18,6 +18,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-utils qemu-user-static e2fsprogs squashfs-tools
 
+      - name: Register binfmt for aarch64
+        run: |
+          # Register qemu-user-static via binfmt_misc so chroot works
+          docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
       - name: Build Alpine rootfs with Claude Code
         run: |
           set -euo pipefail
@@ -43,10 +48,21 @@ jobs:
           https://dl-cdn.alpinelinux.org/alpine/v3.21/community
           EOF
 
-          # 4. 安装运行时依赖 + Linux 内核
-          echo "=== 安装依赖 (libgcc libstdc++ ripgrep bash openssh linux-virt) ==="
-          qemu-aarch64-static -L "$ROOTFS" "$ROOTFS/sbin/apk" add --no-cache \
+          # 4. 用 chroot + binfmt 安装依赖和内核
+          echo "=== chroot 安装依赖 ==="
+          # 挂载 proc/dev/sys 以便 chroot 内的 apk 正常工作
+          sudo mount -t proc proc "$ROOTFS/proc"
+          sudo mount --bind /dev "$ROOTFS/dev"
+          sudo mount -t sysfs sysfs "$ROOTFS/sys"
+          # 复制 resolv.conf 以便 DNS 解析
+          sudo cp /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
+          # chroot 执行 apk install
+          sudo chroot "$ROOTFS" /sbin/apk add --no-cache \
             libgcc libstdc++ ripgrep bash openssh linux-virt
+          # 生成 initramfs
+          sudo chroot "$ROOTFS" /sbin/mkinitfs \
+            -c /etc/mkinitfs/mkinitfs.conf \
+            "$(cat "$ROOTFS/usr/share/kernel/virt/kernel.release")"
 
           # 5. 获取 Claude Code ARM64 musl 二进制
           echo "=== 获取 Claude Code v${CC_VER} ==="
@@ -55,22 +71,18 @@ jobs:
             | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['versions']['${CC_VER}']['dist']['tarball'])")
           curl -fL -o "$WORK/cc.tgz" "$URL"
           mkdir -p "$WORK/cc-x"; tar -xzf "$WORK/cc.tgz" -C "$WORK/cc-x"
-          install -m755 "$WORK/cc-x/package/claude" "$CC_BIN"
+          sudo install -m755 "$WORK/cc-x/package/claude" "$CC_BIN"
 
           # 6. 验证 claude 二进制可执行
           echo "=== 验证 claude ==="
-          qemu-aarch64-static -L "$ROOTFS" "$CC_BIN" --version || true
+          sudo chroot "$ROOTFS" /usr/local/bin/claude --version || true
 
           # 7. 配置串口终端自动登录 (console=ttyAMA0)
           echo "=== 配置串口终端 ==="
-          # 设置 root 无密码
-          qemu-aarch64-static -L "$ROOTFS" "$ROOTFS/usr/sbin/chroot" "$ROOTFS" /bin/sh -c \
-            "echo 'root:::0:::::' | chpasswd -e 2>/dev/null || true"
-          # 直接改 shadow 文件确保无密码登录
-          sed -i 's|^root:.*|root::19000:0:99999:7:::|' "$ROOTFS/etc/shadow"
-          # 配置 agetty 串口自动登录
-          mkdir -p "$ROOTFS/etc/init.d"
-          cat > "$ROOTFS/etc/inittab" <<'INITTAB'
+          # 设置 root 无密码登录
+          sudo sed -i 's|^root:.*|root::19000:0:99999:7:::|' "$ROOTFS/etc/shadow"
+          # 配置 inittab 串口终端
+          sudo tee "$ROOTFS/etc/inittab" <<'INITTAB'
           ::sysinit:/sbin/openrc sysinit
           ::sysinit:/sbin/openrc boot
           ::wait:/sbin/openrc default
@@ -79,16 +91,19 @@ jobs:
           ::shutdown:/sbin/openrc shutdown
           INITTAB
           # 配置网络
-          cat > "$ROOTFS/etc/network/interfaces" <<'NETIF'
+          sudo tee "$ROOTFS/etc/network/interfaces" <<'NETIF'
           auto lo
           iface lo inet loopback
           auto eth0
           iface eth0 inet dhcp
           NETIF
           # 配置 hostname
-          echo "claudebox" > "$ROOTFS/etc/hostname"
+          echo "claudebox" | sudo tee "$ROOTFS/etc/hostname"
 
-          # 8. 创建 ext4 磁盘镜像
+          # 8. 清理 chroot 挂载
+          sudo umount "$ROOTFS/proc" "$ROOTFS/dev" "$ROOTFS/sys" 2>/dev/null || true
+
+          # 9. 创建 ext4 磁盘镜像
           echo "=== 创建 ext4 磁盘镜像 ==="
           dd if=/dev/zero of="$WORK/alpine-rootfs.img" bs=1M count=1024
           mkfs.ext4 -F "$WORK/alpine-rootfs.img"
@@ -97,23 +112,22 @@ jobs:
           sudo cp -a "$ROOTFS/." "$WORK/mnt/"
           sudo umount "$WORK/mnt"
 
-          # 9. 提取 kernel 和 initramfs
+          # 10. 提取 kernel 和 initramfs
           echo "=== 提取 kernel 和 initramfs ==="
           cp "$ROOTFS/boot/vmlinuz-virt" "$WORK/alpine-vmlinuz"
-          # Alpine 的 initramfs 需要用 mkinitfs 生成带 virtio 驱动的版本
-          # 先检查是否有预生成的
+          # mkinitfs 生成的 initramfs 在 /boot 下
+          KVER=$(cat "$ROOTFS/usr/share/kernel/virt/kernel.release")
           if [ -f "$ROOTFS/boot/initramfs-virt" ]; then
             cp "$ROOTFS/boot/initramfs-virt" "$WORK/alpine-initramfs"
+          elif [ -f "$ROOTFS/boot/initramfs-$KVER" ]; then
+            cp "$ROOTFS/boot/initramfs-$KVER" "$WORK/alpine-initramfs"
           else
-            # 用 mkinitfs 生成
-            qemu-aarch64-static -L "$ROOTFS" "$ROOTFS/sbin/mkinitfs" \
-              -c "$ROOTFS/etc/mkinitfs/mkinitfs.conf" \
-              -b "$ROOTFS" \
-              -o "$WORK/alpine-initramfs" \
-              "$(cat "$ROOTFS/usr/share/kernel/virt/kernel.release")"
+            echo "ERROR: initramfs not found. Listing /boot:"
+            ls -la "$ROOTFS/boot/"
+            exit 1
           fi
 
-          # 10. 转换磁盘为 qcow2
+          # 11. 转换磁盘为 qcow2
           echo "=== 转换为 qcow2 ==="
           qemu-img convert -f raw -O qcow2 "$WORK/alpine-rootfs.img" "$PWD/alpine-rootfs.qcow2"
 
