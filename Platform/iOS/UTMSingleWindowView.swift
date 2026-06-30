@@ -258,8 +258,9 @@ struct ClaudeBoxLauncher: View {
         config.drives = [kernelDrive, initrdDrive, diskDrive]
 
         // Kernel command line: serial console + root device.
+        // rootdelay=10 gives virtio_blk time to detect the disk before mount.
         config.qemu.additionalArguments = [
-            QEMUArgument("-append \"console=ttyAMA0 root=/dev/vda rw rootwait init=/sbin/init\"")
+            QEMUArgument("-append \"console=ttyAMA0 root=/dev/vda rw rootwait rootdelay=10 init=/sbin/init\"")
         ]
 
         // Persist through UTMData (writes config.plist under Documents/).
