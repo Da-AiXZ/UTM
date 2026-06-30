@@ -114,18 +114,20 @@ jobs:
 
           # 10. 提取 kernel 和 initramfs
           echo "=== 提取 kernel 和 initramfs ==="
-          cp "$ROOTFS/boot/vmlinuz-virt" "$WORK/alpine-vmlinuz"
+          sudo cp "$ROOTFS/boot/vmlinuz-virt" "$WORK/alpine-vmlinuz"
+          sudo chmod 644 "$WORK/alpine-vmlinuz"
           # mkinitfs 生成的 initramfs 在 /boot 下
-          KVER=$(cat "$ROOTFS/usr/share/kernel/virt/kernel.release")
-          if [ -f "$ROOTFS/boot/initramfs-virt" ]; then
-            cp "$ROOTFS/boot/initramfs-virt" "$WORK/alpine-initramfs"
-          elif [ -f "$ROOTFS/boot/initramfs-$KVER" ]; then
-            cp "$ROOTFS/boot/initramfs-$KVER" "$WORK/alpine-initramfs"
+          KVER=$(sudo cat "$ROOTFS/usr/share/kernel/virt/kernel.release")
+          if sudo test -f "$ROOTFS/boot/initramfs-virt"; then
+            sudo cp "$ROOTFS/boot/initramfs-virt" "$WORK/alpine-initramfs"
+          elif sudo test -f "$ROOTFS/boot/initramfs-$KVER"; then
+            sudo cp "$ROOTFS/boot/initramfs-$KVER" "$WORK/alpine-initramfs"
           else
             echo "ERROR: initramfs not found. Listing /boot:"
-            ls -la "$ROOTFS/boot/"
+            sudo ls -la "$ROOTFS/boot/"
             exit 1
           fi
+          sudo chmod 644 "$WORK/alpine-initramfs"
 
           # 11. 转换磁盘为 qcow2
           echo "=== 转换为 qcow2 ==="
