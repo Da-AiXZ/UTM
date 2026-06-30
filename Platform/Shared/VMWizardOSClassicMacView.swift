@@ -91,7 +91,7 @@ struct VMWizardOSClassicMacView: View {
                 Spinner(size: .large)
             }
         }
-        .fileImporter(isPresented: $isFileImporterPresented, allowedContentTypes: [.data]) { result in
+        .fileImporter(isPresented: $isFileImporterPresented, allowedContentTypes: [.item]) { result in
             wizardState.busyWorkAsync {
                 let url = try result.get()
                 await MainActor.run {

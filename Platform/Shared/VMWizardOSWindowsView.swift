@@ -111,7 +111,7 @@ struct VMWizardOSWindowsView: View {
                 }
             }
         }
-        .fileImporter(isPresented: $isFileImporterPresented, allowedContentTypes: [.data], onCompletion: processImage)
+        .fileImporter(isPresented: $isFileImporterPresented, allowedContentTypes: [.item], onCompletion: processImage)
         .onAppear {
             wizardState.bootDevice = .cd
             #if WITH_QEMU_TCI

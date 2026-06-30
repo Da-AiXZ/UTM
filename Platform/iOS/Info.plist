@@ -125,6 +125,73 @@
 			</dict>
 		</dict>
 	</array>
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Disk Image</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.utmapp.disk-image</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>iso</string>
+					<string>img</string>
+					<string>qcow2</string>
+					<string>qcow</string>
+					<string>vmdk</string>
+					<string>vdi</string>
+					<string>vhd</string>
+					<string>raw</string>
+					<string>squashfs</string>
+					<string>sqsh</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Linux Kernel</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.utmapp.linux-kernel</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>vmlinuz</string>
+					<string>kernel</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>Initramfs</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.utmapp.initramfs</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>initramfs</string>
+					<string>initrd</string>
+					<string>cpio</string>
+					<string>gz</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
