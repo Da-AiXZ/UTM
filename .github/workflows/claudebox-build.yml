@@ -59,7 +59,10 @@ jobs:
           # chroot 执行 apk install
           sudo chroot "$ROOTFS" /sbin/apk add --no-cache \
             libgcc libstdc++ ripgrep bash openssh linux-virt
-          # 生成 initramfs
+          # 配置 mkinitfs 包含 ext4 和 virtio 驱动模块
+          echo 'features="ata base ide scsi usb virtio ext4 ext2"' \
+            | sudo tee "$ROOTFS/etc/mkinitfs/mkinitfs.conf"
+          # 生成 initramfs（带 ext4 + virtio 支持）
           sudo chroot "$ROOTFS" /sbin/mkinitfs \
             -c /etc/mkinitfs/mkinitfs.conf \
             "$(cat "$ROOTFS/usr/share/kernel/virt/kernel.release")"
