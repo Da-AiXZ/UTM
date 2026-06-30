@@ -1,0 +1,106 @@
+# ClaudeBox build: fork UTM, download Sysroot, build unsigned IPA for TrollStore.
+# 适配标准 GitHub Actions runner (非 MacStadium self-hosted)。
+name: ClaudeBox Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app || true
+          xcodebuild -version
+
+      - name: Download Sysroot (ios-arm64)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 从上游 UTM 的 release build 下载 Sysroot-ios-arm64
+          # 需要用 gh CLI 或 API 下载 artifact
+          # artifact 在 upstream utmapp/UTM 的 release run 里
+          pip3 install requests
+          python3 -c "
+          import requests, os, sys, zipfile, tarfile, io
+          # 用 GitHub API 找最新的 release build run
+          headers = {'Authorization': 'token ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
+          # 查 utmapp/UTM 的 workflow runs
+          r = requests.get('https://api.github.com/repos/utmapp/UTM/actions/runs?event=release&per_page=5', headers=headers)
+          r.raise_for_status()
+          runs = r.json()['workflow_runs']
+          if not runs:
+              print('No release runs found'); sys.exit(1)
+          run_id = runs[0]['id']
+          print(f'Using run {run_id}')
+          # 获取 artifacts
+          r = requests.get(f'https://api.github.com/repos/utmapp/UTM/actions/runs/{run_id}/artifacts', headers=headers)
+          r.raise_for_status()
+          arts = r.json()['artifacts']
+          target = None
+          for a in arts:
+              if a['name'] == 'Sysroot-ios-arm64':
+                  target = a; break
+          if not target:
+              print('Sysroot-ios-arm64 not found'); sys.exit(1)
+          print(f'Downloading {target[\"name\"]} ({target[\"size_in_bytes\"]} bytes)')
+          # 下载 artifact (需要 redirect)
+          r = requests.get(target['archive_download_url'], headers=headers, allow_redirects=True, stream=True)
+          r.raise_for_status()
+          # artifact 是 zip, 里面是 sysroot.tgz
+          z = zipfile.ZipFile(io.BytesIO(r.content))
+          z.extractall('.')
+          print('Extracted zip contents:')
+          for f in z.namelist():
+              print(f'  {f}')
+          "
+          # 解压 sysroot.tgz
+          ls -la sysroot.tgz
+          tar -xzf sysroot.tgz
+          echo "--- sysroot 目录 ---"
+          ls -d sysroot-*/
+          ls sysroot-ios-arm64/ | head -10
+
+      - name: Resolve SPM packages
+        run: |
+          xcodebuild -resolvePackageDependencies -project UTM.xcodeproj -scheme iOS || true
+
+      - name: Build unsigned archive
+        run: |
+          ./scripts/build_utm.sh -k iphoneos -s iOS -a arm64 -o build/ClaudeBox
+          ls -la build/ClaudeBox.xcarchive/Products/Applications/
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH=$(find build/ClaudeBox.xcarchive -name "UTM.app" -type d | head -1)
+          mkdir -p Payload
+          cp -r "$APP_PATH" Payload/
+          # 改名为 ClaudeBox
+          if [ -d "Payload/UTM.app" ]; then
+            mv "Payload/UTM.app" "Payload/ClaudeBox.app"
+          fi
+          zip -r ClaudeBox-unsigned.ipa Payload
+          ls -lh ClaudeBox-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeBox-unsigned-ipa
+          path: ClaudeBox-unsigned.ipa
+          retention-days: 7
+
+      - name: Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ClaudeBox-unsigned.ipa
