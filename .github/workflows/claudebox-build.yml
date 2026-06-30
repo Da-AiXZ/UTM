@@ -1,4 +1,4 @@
-# ClaudeBox build: fork UTM, download Sysroot, build unsigned IPA for TrollStore.
+# ClaudeBox build: fork UTM, build Alpine rootfs, build unsigned IPA for TrollStore.
 # 适配标准 GitHub Actions runner (非 MacStadium self-hosted)。
 name: ClaudeBox Build
 
@@ -9,7 +9,134 @@ on:
       - 'v*'
 
 jobs:
+  # ── Job 1: 在 Linux 上构建 Alpine rootfs + kernel + initramfs ──
+  build-rootfs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-utils qemu-user-static e2fsprogs squashfs-tools
+
+      - name: Build Alpine rootfs with Claude Code
+        run: |
+          set -euo pipefail
+          ALPINE_VER="3.21.7"
+          CC_VER="2.1.196"
+          WORK="$PWD/rootfs-work"
+          ROOTFS="$WORK/rootfs"
+          mkdir -p "$WORK"
+
+          # 1. 下载 Alpine aarch64 minirootfs
+          echo "=== 下载 Alpine ${ALPINE_VER} aarch64 minirootfs ==="
+          curl -fL -o "$WORK/minirootfs.tar.gz" \
+            "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/aarch64/alpine-minirootfs-${ALPINE_VER}-aarch64.tar.gz"
+
+          # 2. 解压 rootfs
+          echo "=== 解压 minirootfs ==="
+          rm -rf "$ROOTFS"; mkdir -p "$ROOTFS"
+          tar -xzf "$WORK/minirootfs.tar.gz" -C "$ROOTFS"
+
+          # 3. 配置 apk 仓库
+          cat > "$ROOTFS/etc/apk/repositories" <<'EOF'
+          https://dl-cdn.alpinelinux.org/alpine/v3.21/main
+          https://dl-cdn.alpinelinux.org/alpine/v3.21/community
+          EOF
+
+          # 4. 安装运行时依赖 + Linux 内核
+          echo "=== 安装依赖 (libgcc libstdc++ ripgrep bash openssh linux-virt) ==="
+          qemu-aarch64-static -L "$ROOTFS" "$ROOTFS/sbin/apk" add --no-cache \
+            libgcc libstdc++ ripgrep bash openssh linux-virt
+
+          # 5. 获取 Claude Code ARM64 musl 二进制
+          echo "=== 获取 Claude Code v${CC_VER} ==="
+          CC_BIN="$ROOTFS/usr/local/bin/claude"
+          URL=$(curl -fsSL "https://registry.npmjs.org/@anthropic-ai/claude-code-linux-arm64-musl" \
+            | python3 -c "import sys,json;d=json.load(sys.stdin);print(d['versions']['${CC_VER}']['dist']['tarball'])")
+          curl -fL -o "$WORK/cc.tgz" "$URL"
+          mkdir -p "$WORK/cc-x"; tar -xzf "$WORK/cc.tgz" -C "$WORK/cc-x"
+          install -m755 "$WORK/cc-x/package/claude" "$CC_BIN"
+
+          # 6. 验证 claude 二进制可执行
+          echo "=== 验证 claude ==="
+          qemu-aarch64-static -L "$ROOTFS" "$CC_BIN" --version || true
+
+          # 7. 配置串口终端自动登录 (console=ttyAMA0)
+          echo "=== 配置串口终端 ==="
+          # 设置 root 无密码
+          qemu-aarch64-static -L "$ROOTFS" "$ROOTFS/usr/sbin/chroot" "$ROOTFS" /bin/sh -c \
+            "echo 'root:::0:::::' | chpasswd -e 2>/dev/null || true"
+          # 直接改 shadow 文件确保无密码登录
+          sed -i 's|^root:.*|root::19000:0:99999:7:::|' "$ROOTFS/etc/shadow"
+          # 配置 agetty 串口自动登录
+          mkdir -p "$ROOTFS/etc/init.d"
+          cat > "$ROOTFS/etc/inittab" <<'INITTAB'
+          ::sysinit:/sbin/openrc sysinit
+          ::sysinit:/sbin/openrc boot
+          ::wait:/sbin/openrc default
+          ttyAMA0::respawn:/sbin/getty -L 0 ttyAMA0 vt100
+          ::ctrlaltdel:/sbin/reboot
+          ::shutdown:/sbin/openrc shutdown
+          INITTAB
+          # 配置网络
+          cat > "$ROOTFS/etc/network/interfaces" <<'NETIF'
+          auto lo
+          iface lo inet loopback
+          auto eth0
+          iface eth0 inet dhcp
+          NETIF
+          # 配置 hostname
+          echo "claudebox" > "$ROOTFS/etc/hostname"
+
+          # 8. 创建 ext4 磁盘镜像
+          echo "=== 创建 ext4 磁盘镜像 ==="
+          dd if=/dev/zero of="$WORK/alpine-rootfs.img" bs=1M count=1024
+          mkfs.ext4 -F "$WORK/alpine-rootfs.img"
+          mkdir -p "$WORK/mnt"
+          sudo mount -o loop "$WORK/alpine-rootfs.img" "$WORK/mnt"
+          sudo cp -a "$ROOTFS/." "$WORK/mnt/"
+          sudo umount "$WORK/mnt"
+
+          # 9. 提取 kernel 和 initramfs
+          echo "=== 提取 kernel 和 initramfs ==="
+          cp "$ROOTFS/boot/vmlinuz-virt" "$WORK/alpine-vmlinuz"
+          # Alpine 的 initramfs 需要用 mkinitfs 生成带 virtio 驱动的版本
+          # 先检查是否有预生成的
+          if [ -f "$ROOTFS/boot/initramfs-virt" ]; then
+            cp "$ROOTFS/boot/initramfs-virt" "$WORK/alpine-initramfs"
+          else
+            # 用 mkinitfs 生成
+            qemu-aarch64-static -L "$ROOTFS" "$ROOTFS/sbin/mkinitfs" \
+              -c "$ROOTFS/etc/mkinitfs/mkinitfs.conf" \
+              -b "$ROOTFS" \
+              -o "$WORK/alpine-initramfs" \
+              "$(cat "$ROOTFS/usr/share/kernel/virt/kernel.release")"
+          fi
+
+          # 10. 转换磁盘为 qcow2
+          echo "=== 转换为 qcow2 ==="
+          qemu-img convert -f raw -O qcow2 "$WORK/alpine-rootfs.img" "$PWD/alpine-rootfs.qcow2"
+
+          # 移动文件到输出目录
+          cp "$WORK/alpine-vmlinuz" "$PWD/alpine-vmlinuz"
+          cp "$WORK/alpine-initramfs" "$PWD/alpine-initramfs"
+
+          echo "=== 输出文件 ==="
+          ls -lh "$PWD/alpine-rootfs.qcow2" "$PWD/alpine-vmlinuz" "$PWD/alpine-initramfs"
+
+      - name: Upload rootfs artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpine-rootfs
+          path: |
+            alpine-rootfs.qcow2
+            alpine-vmlinuz
+            alpine-initramfs
+          retention-days: 3
+
+  # ── Job 2: 在 macOS 上构建 IPA ──
   build:
+    needs: build-rootfs
     runs-on: macos-15
     permissions:
       contents: write
@@ -28,18 +155,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # 用 gh CLI 从上游 UTM 的 release build 下载 Sysroot-ios-arm64
-          # 找最新的 release run
           RUN_ID=$(gh run list --repo utmapp/UTM --workflow Build --event release --limit 1 --json databaseId --jq '.[0].databaseId')
           echo "Using upstream run: $RUN_ID"
-          # 下载 artifact (gh 会解压 zip)
           mkdir -p sysroot-tmp
           gh run download "$RUN_ID" --repo utmapp/UTM --name Sysroot-ios-arm64 --dir sysroot-tmp
-          # artifact 里是 sysroot.tgz, 解压到仓库根
           ls -la sysroot-tmp/
           tar -xzf sysroot-tmp/sysroot.tgz
           echo "--- sysroot 目录 ---"
           ls -d sysroot-*/
           ls sysroot-ios-arm64/ | head -10
+
+      - name: Download Alpine rootfs
+        uses: actions/download-artifact@v4
+        with:
+          name: alpine-rootfs
+          path: alpine-assets
 
       - name: Resolve SPM packages
         run: |
@@ -49,6 +179,17 @@ jobs:
         run: |
           ./scripts/build_utm.sh -k iphoneos -s iOS -a arm64 -o build/ClaudeBox
           ls -la build/ClaudeBox.xcarchive/Products/Applications/
+
+      - name: Inject Alpine assets into App bundle
+        run: |
+          APP_PATH=$(find build/ClaudeBox.xcarchive -name "UTM.app" -type d | head -1)
+          echo "App bundle: $APP_PATH"
+          mkdir -p "$APP_PATH/AlpineAssets"
+          cp alpine-assets/alpine-rootfs.qcow2 "$APP_PATH/AlpineAssets/"
+          cp alpine-assets/alpine-vmlinuz "$APP_PATH/AlpineAssets/"
+          cp alpine-assets/alpine-initramfs "$APP_PATH/AlpineAssets/"
+          echo "--- AlpineAssets 内容 ---"
+          ls -lh "$APP_PATH/AlpineAssets/"
 
       - name: Package unsigned IPA
         run: |

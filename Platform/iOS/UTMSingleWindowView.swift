@@ -204,6 +204,8 @@ struct ClaudeBoxLauncher: View {
     /// Builds a minimal Alpine ARM64 VM configuration: aarch64/virt machine,
     /// CPU `max`, 512 MB RAM, no graphical display (‑nographic), a single
     /// builtin serial port (SPICE terminal), TCG software emulation.
+    /// Uses direct kernel boot (-kernel/-initrd) with an ext4 rootfs disk
+    /// bundled in AlpineAssets/.
     private func createAlpineVM() async throws -> VMData {
         let config = UTMQemuConfiguration()
         config.information.name = Self.vmName
@@ -226,8 +228,88 @@ struct ClaudeBoxLauncher: View {
         // Force TCG (software emulation) — iOS has no hypervisor access.
         config.qemu.hasHypervisor = false
 
+        // Direct kernel boot: no UEFI firmware needed.
+        config.qemu.hasUefiBoot = false
+
+        // Copy bundled Alpine assets to Documents/ (writable area).
+        let assets = try prepareAlpineAssets()
+
+        // Drive 1: Linux kernel (-kernel)
+        var kernelDrive = UTMQemuConfigurationDrive()
+        kernelDrive.imageType = .linuxKernel
+        kernelDrive.imageURL = assets.kernelURL
+        kernelDrive.isExternal = false
+
+        // Drive 2: initramfs (-initrd)
+        var initrdDrive = UTMQemuConfigurationDrive()
+        initrdDrive.imageType = .linuxInitrd
+        initrdDrive.imageURL = assets.initrdURL
+        initrdDrive.isExternal = false
+
+        // Drive 3: rootfs disk (-drive if=virtio)
+        var diskDrive = UTMQemuConfigurationDrive()
+        diskDrive.imageType = .disk
+        diskDrive.interface = .virtio
+        diskDrive.imageURL = assets.diskURL
+        diskDrive.isExternal = false
+        diskDrive.isReadOnly = false
+        diskDrive.interfaceVersion = UTMQemuConfigurationDrive.latestInterfaceVersion
+
+        config.drives = [kernelDrive, initrdDrive, diskDrive]
+
+        // Kernel command line: serial console + root device.
+        config.qemu.additionalArguments = [
+            QEMUArgument("-append \"console=ttyAMA0 root=/dev/vda rw rootwait init=/sbin/init\"")
+        ]
+
         // Persist through UTMData (writes config.plist under Documents/).
         return try await data.create(config: config)
+    }
+
+    /// Alpine asset paths after copying from the read-only app bundle to
+    /// the writable Documents directory.
+    private struct AlpineAssets {
+        let kernelURL: URL
+        let initrdURL: URL
+        let diskURL: URL
+    }
+
+    /// Copies `AlpineAssets/` from the app bundle into `Documents/AlpineAssets/`
+    /// so QEMU can open them read-write. Returns URLs to the three files.
+    /// If the files already exist in Documents (from a previous run), they
+    /// are reused.
+    private func prepareAlpineAssets() throws -> AlpineAssets {
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let destDir = docs.appendingPathComponent("AlpineAssets", isDirectory: true)
+
+        // Create destination directory.
+        try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+
+        // Source directory inside the app bundle.
+        guard let bundleDir = Bundle.main.resourceURL?.appendingPathComponent("AlpineAssets", isDirectory: true),
+              fm.fileExists(atPath: bundleDir.path) else {
+            throw NSError(domain: "ClaudeBox", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "AlpineAssets not found in app bundle."
+            ])
+        }
+
+        let files = ["alpine-vmlinuz", "alpine-initramfs", "alpine-rootfs.qcow2"]
+        let urls = files.map { destDir.appendingPathComponent($0) }
+
+        for (index, name) in files.enumerated() {
+            let src = bundleDir.appendingPathComponent(name)
+            let dst = urls[index]
+            if !fm.fileExists(atPath: dst.path) {
+                try fm.copyItem(at: src, to: dst)
+            }
+        }
+
+        return AlpineAssets(
+            kernelURL: urls[0],
+            initrdURL: urls[1],
+            diskURL: urls[2]
+        )
     }
 }
 
