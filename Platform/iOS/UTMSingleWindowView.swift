@@ -99,31 +99,33 @@ struct ClaudeBoxLauncher: View {
         VStack(spacing: 24) {
             Image(systemName: "terminal.fill")
                 .font(.system(size: 56))
-                .foregroundStyle(.tint)
+                .foregroundColor(.accentColor)
             Text("ClaudeBox")
                 .font(.largeTitle.bold())
             if let errorMessage = errorMessage {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .font(.title)
-                    .foregroundStyle(.orange)
+                    .foregroundColor(.orange)
                 Text(errorMessage)
                     .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
                     .padding(.horizontal, 32)
             } else {
                 Text(statusMessage)
                     .font(.callout)
-                    .foregroundStyle(.secondary)
+                    .foregroundColor(.secondary)
                 ProgressView()
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
-        .task {
+        .background(Color(UIColor.systemBackground))
+        .onAppear {
             guard !hasLaunched else { return }
             hasLaunched = true
-            await launch()
+            Task {
+                await launch()
+            }
         }
     }
 
